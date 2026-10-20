@@ -1,0 +1,15 @@
+# Tell Grafana to load any dashboard JSON found in the mounted dashboards dir,
+# so the job queue dashboard shows up automatically on first boot.
+apiVersion: 1
+
+providers:
+  - name: jobqueue
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

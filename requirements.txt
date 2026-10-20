@@ -1,0 +1,8 @@
+# Core dependencies for the API, workers, and load test.
+# Pinned to recent stable releases for reproducible Docker builds.
+flask==3.0.3
+redis==5.0.8
+prometheus-client==0.20.0
+gunicorn==22.0.0
+requests==2.32.3
+Flask-Cors

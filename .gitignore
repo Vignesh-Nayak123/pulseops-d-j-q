@@ -1,0 +1,37 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage*
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files with local secrets or overrides
+.env
+.env.*
+!.env.example
+
+# Local data files (redis dumps, logs, scratch output)
+*.rdb
+*.aof
+*.log
+data/
+dump.rdb
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

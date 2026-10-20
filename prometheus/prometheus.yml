@@ -1,0 +1,23 @@
+# Prometheus scrape configuration.
+# Scrapes two targets: the API (cluster-wide queue depth) and every worker
+# replica (per-worker throughput, latency, failures).
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The API exposes the cluster-wide queue depth collector on /metrics.
+  - job_name: jobqueue-api
+    static_configs:
+      - targets: ["api:8000"]
+
+  # Workers each serve metrics on :9100. We scale workers to several replicas,
+  # all sharing the service name "worker". Docker Compose's embedded DNS returns
+  # an A record per running container, so a DNS service discovery on "worker"
+  # picks up every replica automatically, no matter how many we scale to.
+  - job_name: jobqueue-workers
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100

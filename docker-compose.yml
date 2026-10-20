@@ -1,0 +1,81 @@
+# Brings up the whole system with one command:
+#   docker compose up --build
+#
+# Services:
+#   redis       the queue backing store.
+#   api         Flask REST API served by gunicorn on :8000.
+#   worker      job executor, scaled to 3 replicas by default.
+#   prometheus  scrapes the api and workers on :9090.
+#   grafana     dashboards on :3000, datasource and dashboard auto-provisioned.
+
+services:
+  redis:
+    image: redis:7-alpine
+    # Persist to disk so jobs survive a redis restart during a demo.
+    command: [ "redis-server", "--appendonly", "yes" ]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    # gunicorn with a few threads handles concurrent HTTP without extra procs.
+    command: [ "gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "4", "jobqueue.api:app" ]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: [ "python", "-m", "jobqueue", "worker" ]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      VISIBILITY_TIMEOUT: "30"
+      MAX_ATTEMPTS: "5"
+      BACKOFF_BASE: "2"
+      BACKOFF_MAX: "300"
+      WORKER_METRICS_PORT: "9100"
+    # Three workers compete for jobs out of the box. Scale with:
+    #   docker compose up --scale worker=10
+    deploy:
+      replicas: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      # Anonymous viewing so you can open the dashboard without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  redis-data:
