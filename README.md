@@ -531,221 +531,158 @@ python loadtest/loadtest.py --count 1000 --type sleep --priority high
 
 ## Metrics
 
-Prometheus scrapes the API at `api:8000/metrics` and every worker replica at
-`worker:9100/metrics`. The API exposes cluster-wide Redis-derived queue state and
-lifetime counters; workers expose process-local counters and histograms. Docker's
-DNS service discovery finds every worker replica, so scaling the worker pool does
-not require a scrape-config change. The dashboard and recording rules aggregate
-across all worker instances.
+Prometheus scrapes the API and every worker replica; Docker DNS service discovery finds all worker replicas, so scaling workers does not require scrape-config changes.
 
-Queue-depth gauges are read from Redis once per Prometheus scrape (5 seconds in
-the provided config), so they refresh even when no jobs are moving. There is no
-background polling loop and no per-job Redis polling added for metrics.
+- **API** `http://api:8000/metrics` (cluster-wide Redis-derived queue state and lifetime counters, plus API request metrics)
+- **Workers** `http://worker:9100/metrics` (per-process counters, gauges, and histograms)
+- **Dashboard/recording rules** aggregate worker series across instances; cluster-wide counters are emitted once by the API.
 
-### Metric catalog
+Queue-depth gauges and cluster counters are read from Redis on each Prometheus scrape (5s in the provided config). There is no background polling loop and no per-job Redis polling for metrics.
 
-#### Cluster-wide metrics (API `/metrics`)
+### Cluster-wide metrics (API `/metrics`)
 
-These are exposed once for the whole Redis-backed cluster by
-`QueueDepthCollector`. They are accurate across workers because Redis is the
-shared source of truth.
+Exposed by `QueueDepthCollector` from live Redis state (`/stats`/Lua-maintained counters). These represent the whole cluster.
 
-| Metric | Type | Labels | Meaning | Scope |
-| --- | --- | --- | --- | --- |
-| `jobqueue_queue_depth` | Gauge | `state` | Current jobs in a state: `ready:<priority>`, `ready_total`, `scheduled`, `scheduled_due`, `inflight`, `dead`. `scheduled_due` counts scheduled jobs whose run-at time has arrived and are awaiting promotion. `dead` is the dead-letter list length. | Cluster-wide snapshot, refreshed every scrape. |
-| `jobqueue_redis_up` | Gauge | none | `1` when the API could read queue state from Redis during this scrape, `0` otherwise. | API process. |
-| `jobqueue_jobs_enqueued_total` | Counter | none | New jobs created by enqueue calls. Idempotent dedupe returns are excluded. | Cluster-wide lifetime. |
-| `jobqueue_jobs_completed_total` | Counter | none | Jobs acknowledged as completed. | Cluster-wide lifetime. |
-| `jobqueue_failed_attempts_total` | Counter | none | Failed delivery attempts: handler failures and visibility timeouts, including retries. This counts attempts, not unique jobs. | Cluster-wide lifetime. |
-| `jobqueue_jobs_retried_total` | Counter | none | Handler failures scheduled for a backoff retry. Visibility-timeout requeues are separate. | Cluster-wide lifetime. |
-| `jobqueue_dead_letters_total` | Counter | none | Jobs moved to the dead-letter list after exhausting handler attempts or visibility-timeout attempts. | Cluster-wide lifetime. |
-| `jobqueue_jobs_promoted_total` | Counter | none | Scheduled or backed-off jobs moved into a ready queue by a promoter. | Cluster-wide lifetime. |
-| `jobqueue_idempotency_dedup_total` | Counter | none | Enqueue requests deduplicated by an `idempotency_key`. | Cluster-wide lifetime. |
-
-Completed and failed jobs are not a current queue state in this design, so they
-are represented by lifetime counters rather than queue-depth gauges. Only ready
-queues are priority-indexed in Redis; scheduled, inflight, and dead-letter depth
-are cluster-wide totals.
-
-#### Worker metrics (each worker `:9100/metrics`)
-
-These series are process-local. Prometheus scrapes every worker replica; the
-dashboard sums or rates across them. A worker restart resets its counters, which
-`rate()` and `increase()` handle as normal counter resets.
-
-| Metric | Type | Labels | Meaning |
+| Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `jobqueue_jobs_processed_total` | Counter | `job_type`, `outcome`, `priority` | Concluded delivery attempts. `outcome` is `completed`, `retry`, `dead`, or `lost`. A job can appear as `retry` and later as `completed` or `dead`; this is not a final-job counter. |
-| `jobqueue_job_processing_seconds` | Histogram | `job_type`, `outcome` | Handler execution time per delivery attempt. Failures are observed too. |
-| `jobqueue_queue_wait_seconds` | Histogram | `job_type`, `priority` | Enqueue-to-start wall time. For delayed jobs and retries this includes intentional delay or backoff. |
-| `jobqueue_job_total_seconds` | Histogram | `job_type`, `priority` | Enqueue-to-successful-completion wall time. Observed only when the ack succeeds. |
-| `jobqueue_retry_delay_seconds` | Histogram | `job_type` | Backoff delay chosen for a handler-failure retry. Visibility-timeout requeues are immediate and counted by `jobqueue_reaped_total`. |
-| `jobqueue_handler_errors_total` | Counter | `job_type`, `error_type` | Handler exceptions. `error_type` is the exception class name, never the exception message or payload. |
-| `jobqueue_reaped_total` | Counter | `action` | Visibility-timeout actions: `requeued` or `dead`. The Lua script guarantees each expired job is handled once, so summing across workers is accurate. |
-| `jobqueue_background_errors_total` | Counter | `loop` | Errors raised by a worker's `reaper` or `promoter` loop. |
-| `jobqueue_worker_inflight` | Gauge | none | Jobs currently executing in this worker process. With the one-job-at-a-time model this is 0 or 1; sum across workers for live concurrency. |
+| `jobqueue_queue_depth` | Gauge | `state` | Current jobs by state. `state` values: `ready:<priority>` for each configured priority, `ready_total`, `scheduled`, `scheduled_due` (due now, awaiting promotion), `inflight`, `dead` (DLQ length). |
+| `jobqueue_redis_up` | Gauge | — | `1` if the API could read queue state from Redis during the scrape, else `0`. |
+| `jobqueue_jobs_enqueued_total` | Counter | — | New jobs created by enqueue calls (idempotent dedupe hits excluded). |
+| `jobqueue_jobs_completed_total` | Counter | — | Jobs acknowledged as completed. |
+| `jobqueue_failed_attempts_total` | Counter | — | Failed delivery attempts: handler failures and visibility timeouts, including retries (attempt count, not unique jobs). |
+| `jobqueue_jobs_retried_total` | Counter | — | Handler failures scheduled for backoff retry (visibility-timeout requeues are separate). |
+| `jobqueue_dead_letters_total` | Counter | — | Jobs moved to the dead-letter list after exhausting handler or visibility-timeout attempts. |
+| `jobqueue_jobs_promoted_total` | Counter | — | Scheduled/backoff jobs moved into a ready queue by the promoter. |
+| `jobqueue_idempotency_dedup_total` | Counter | — | Enqueue requests deduplicated by `idempotency_key`. |
 
-Prometheus also exposes its standard `up` series for each scrape target and
-`process_*`/`python_gc_*` process metrics from the Prometheus client.
+Notes: completed/failed are tracked as lifetime counters (not current queue states). Only ready queues are priority-indexed in Redis; `scheduled`, `inflight`, and `dead` depths are cluster-wide totals.
 
-#### API request metrics (API `/metrics`)
+### Worker metrics (each worker `:9100/metrics`)
 
-These are process-local to the API process. The current Compose setup runs one
-API worker; if you scale API replicas, sum across them.
+Process-local series scraped from every worker replica. Use `sum`/`rate`/`increase` across instances; counters reset on worker restart (normal Prometheus counter reset handling applies).
 
-| Metric | Type | Labels | Meaning |
+| Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `jobqueue_api_requests_total` | Counter | `method`, `path`, `status` | HTTP requests by method, Flask route pattern, and status code. `path` is the route pattern such as `/jobs/<job_id>`, never the concrete job id. `/metrics` scrapes are excluded. |
-| `jobqueue_api_request_duration_seconds` | Histogram | `method`, `path` | API request latency by method and route pattern. `/metrics` scrapes are excluded. |
+| `jobqueue_jobs_processed_total` | Counter | `job_type`, `outcome`, `priority` | Concluded delivery attempts. `outcome`: `completed`, `retry`, `dead`, `lost`. Retries produce multiple observations for the same job over time (not a final-job counter). |
+| `jobqueue_job_processing_seconds` | Histogram | `job_type`, `outcome` | Handler execution time per delivery attempt, including failures. Buckets (s): `0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300`. |
+| `jobqueue_queue_wait_seconds` | Histogram | `job_type`, `priority` | Enqueue-to-delivery-start wall time; includes intentional delay/backoff for delayed jobs and retries. Buckets (s): `0.01..1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600`. |
+| `jobqueue_job_total_seconds` | Histogram | `job_type`, `priority` | Enqueue-to-successful-completion wall time (observed only when ack succeeds). Buckets (s): same as `queue_wait_seconds`. |
+| `jobqueue_retry_delay_seconds` | Histogram | `job_type` | Backoff delay scheduled for handler-failure retries (visibility-timeout requeues are immediate; see `jobqueue_reaped_total`). Buckets (s): `0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300`. |
+| `jobqueue_handler_errors_total` | Counter | `job_type`, `error_type` | Handler exceptions by exception class name (`error_type`), never exception message/payload. |
+| `jobqueue_reaped_total` | Counter | `action` | Visibility-timeout actions by this worker's reaper: `requeued` or `dead` (each expired job handled once). |
+| `jobqueue_background_errors_total` | Counter | `loop` | Errors in worker background loops: `reaper` or `promoter`. |
+| `jobqueue_worker_inflight` | Gauge | — | Jobs currently executing in this worker process (`0` or `1` with one-job-at-a-time workers); sum across workers for live concurrency. |
 
-### Label safety
+Prometheus/client runtime series such as `up`, `process_*`, and `python_gc_*` are also exposed by scraped targets.
 
-Every label is bounded:
+### API request metrics (API `/metrics`)
 
-- `job_type` is a registered handler type or `unregistered`.
-- `priority` is one of the configured priorities or `unknown`.
-- `error_type` is the Python exception class name or `exception`; exception text
-  is never used.
-- API `path` is the Flask route pattern or `unmatched`.
-- API `method`, `status`, and queue `state` come from small fixed sets.
+Process-local to the API process (current Compose runs one API replica; sum across replicas if scaled).
 
-Job IDs, idempotency keys, payload values, email addresses, credentials, and
-exception messages are never used as label values. The SMTP, report, and text
-handlers are observed through the generic `job_type` labels; no payload-derived
-metrics are emitted.
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `jobqueue_api_requests_total` | Counter | `method`, `path`, `status` | HTTP requests by method, Flask route pattern, and status code. `path` is the route pattern (e.g. `/jobs/<job_id>`), never a concrete job id. `/metrics` scrapes excluded. |
+| `jobqueue_api_request_duration_seconds` | Histogram | `method`, `path` | API request latency by method and route pattern. `/metrics` scrapes excluded. Buckets (s): `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10`. |
 
-### Scope, duplication, and counter resets
+### Label safety and cardinality
 
-- **Cluster-wide counters** come from Redis and survive worker restarts. They
-  reset only if Redis data is lost. `jobqueue_queue_depth` is a live gauge, not a
-  counter.
-- **Worker and API counters** are process-local and reset when that process
-  restarts. Use `rate()` or `increase()`; Prometheus handles resets. Sum the
-  per-instance series for cluster throughput.
-- `jobqueue_jobs_processed_total{outcome="completed"}` and
-  `jobqueue_jobs_completed_total` describe the same acks at different scopes
-  (worker dimension vs. cluster lifetime). Do not add them together. The same
-  applies to worker `outcome="retry"` versus `jobqueue_jobs_retried_total`, and
-  to worker `outcome="dead"` versus `jobqueue_dead_letters_total`.
-- `jobqueue_failed_attempts_total` counts failed attempts, not unique jobs. A job
-  retried three times can contribute three failed attempts plus one completion.
-- `jobqueue_dead_letters_total` includes dead letters produced by the reaper
-  after visibility timeouts, not only worker-observed `outcome="dead"` events.
-- `jobqueue_jobs_processed_total{outcome="retry"}` counts handler-failure
-  retries. Reaper requeues are visibility timeouts and appear in
-  `jobqueue_reaped_total{action="requeued"}` and
-  `jobqueue_failed_attempts_total`.
-- `jobqueue_queue_wait_seconds` includes intentional delay and backoff;
-  `jobqueue_job_processing_seconds` is handler execution only.
-- `jobqueue_jobs_enqueued_total` counts newly created jobs. An idempotent
-  submission that returns an existing job increments
-  `jobqueue_idempotency_dedup_total` instead.
+All labels are bounded to prevent high-cardinality series:
 
-### Upgrading from earlier metric names
+- `job_type`: registered handler type or `unregistered`
+- `priority`: configured priority or `unknown`
+- `outcome`: `completed` | `retry` | `dead` | `lost`
+- `action`: `requeued` | `dead`
+- `loop`: `reaper` | `promoter`
+- `error_type`: Python exception class name or `exception` (never exception text)
+- `state`: `ready:<priority>`, `ready_total`, `scheduled`, `scheduled_due`, `inflight`, `dead`
+- `method`, `path` (route pattern or `unmatched`), `status`: bounded HTTP/route/status values
 
-The older `jobqueue_jobs_total{kind="enqueued|completed|failed"}` series has been
-replaced by `jobqueue_jobs_enqueued_total`, `jobqueue_jobs_completed_total`, and
-`jobqueue_failed_attempts_total`. That gives each counter a stable name and an
-accurate help string. Update any saved queries that still select
-`jobqueue_jobs_total`.
+Job IDs, idempotency keys, payloads, email addresses, credentials, and exception messages are never used as labels.
 
-Two worker series gained labels without changing their names:
-`jobqueue_jobs_processed_total` now has a `priority` label, and
-`jobqueue_job_processing_seconds` now has an `outcome` label. Existing
-aggregations that sum across workers keep working; queries that grouped only by
-`job_type` may now show one series per priority or outcome.
+### Scope, overlap, and interpretation
 
-### Retry versus final failure
+- **Cluster-wide (Redis/API):** `jobqueue_queue_depth`, `jobqueue_redis_up`, and all `*_total` counters from the API collector survive worker restarts (reset only on Redis data loss).
+- **Process-local (workers/API requests):** reset on process restart; use `rate()`/`increase()` and aggregate across instances.
+- **Do not double-count overlapping scopes:** e.g. `jobqueue_jobs_processed_total{outcome="completed"}` (worker, by type/priority) vs `jobqueue_jobs_completed_total` (cluster lifetime) describe the same acks at different scopes. Similarly for retries/dead letters vs worker outcomes.
+- **Attempts vs jobs:** `jobqueue_failed_attempts_total` counts failed attempts, not unique jobs. A retried job contributes multiple failed attempts plus eventual completion or dead-lettering.
+- **Retries vs timeouts:** `jobqueue_jobs_processed_total{outcome="retry"}` and `jobqueue_jobs_retried_total` cover handler-failure retries. Visibility-timeout requeues are tracked by `jobqueue_reaped_total{action="requeued"}` (and contribute to `jobqueue_failed_attempts_total`).
+- **Dead letters:** `jobqueue_dead_letters_total` includes dead letters caused by visibility timeouts as well as handler-failure exhaustion.
+- **Timing semantics:** `queue_wait_seconds` includes intentional delay/backoff; `job_processing_seconds` measures handler execution only; `job_total_seconds` is enqueue-to-successful-completion.
 
-A retry is not a final failure. A handler failure produces a `retry` outcome and
-a backoff delay while attempts remain; once attempts are exhausted it produces a
-`dead` outcome. A visibility timeout produces a reaper `requeued` action while
-attempts remain and a reaper `dead` action once exhausted. Final failures are
-therefore:
+### Recording rules (`prometheus/rules.yml`)
 
-```promql
-sum(increase(jobqueue_jobs_processed_total{outcome="dead"}[1h]))
-+
-sum(increase(jobqueue_reaped_total{action="dead"}[1h]))
-```
+Precomputed series (5m windows) for dashboards and ad-hoc queries:
 
-For an all-in one cluster-wide counter, use:
+| Recording rule | Meaning |
+| --- | --- |
+| `jobqueue:jobs_processed:rate5m` | Throughput by `job_type`, `outcome` |
+| `jobqueue:throughput:rate5m` | Overall processing rate |
+| `jobqueue:failure_ratio:rate5m` | `(retry + dead + lost) / processed` |
+| `jobqueue:retry:rate5m`, `jobqueue:dead_letters:rate5m`, `jobqueue:failed_attempts:rate5m` | Retry, dead-letter, and failed-attempt rates |
+| `jobqueue:handler_errors:rate5m` | Handler errors by `job_type`, `error_type` |
+| `jobqueue:queue_backlog:sum`, `jobqueue:queue_outstanding:sum`, `jobqueue:queue_work_in_progress:sum` | Ready+scheduled, +inflight, and inflight depth |
+| `jobqueue:queue_scheduled_due:sum`, `jobqueue:queue_dead_depth:sum` | Due scheduled jobs and DLQ depth |
+| `jobqueue:processing_latency:p50_5m/p95_5m/p99_5m` | Handler processing latency percentiles |
+| `jobqueue:queue_wait:p50_5m/p95_5m`, `jobqueue:job_total_time:p50_5m/p95_5m` | Wait and end-to-end latency percentiles |
+| `jobqueue:retry_delay:p95_5m` | Backoff delay p95 |
+| `jobqueue:workers_up:sum`, `jobqueue:workers_down:sum`, `jobqueue:workers_inflight:sum` | Worker availability and concurrency |
+| `jobqueue:reaped:rate5m`, `jobqueue:background_errors:rate5m` | Reaper actions and background loop errors |
+| `jobqueue:jobs_enqueued:rate5m`, `jobqueue:jobs_completed:rate5m`, `jobqueue:jobs_retried:rate5m` | Cluster enqueue/complete/retry rates |
+| `jobqueue:promotions:rate5m`, `jobqueue:idempotency_dedup:rate5m` | Promotion and dedupe rates |
+| `jobqueue:api_requests:rate5m`, `jobqueue:api_error_ratio:rate5m`, `jobqueue:api_latency:p95_5m` | API traffic, 5xx ratio, and p95 latency |
+
+### Useful PromQL examples
 
 ```promql
-increase(jobqueue_dead_letters_total[1h])
-```
-
-### PromQL examples
-
-```promql
-# Throughput across all workers.
+# Throughput and outcomes
 sum(rate(jobqueue_jobs_processed_total[5m]))
-
-# Throughput by outcome and job type.
 sum by (job_type, outcome) (rate(jobqueue_jobs_processed_total[5m]))
 
-# Failure ratio (retry + dead + lost as a share of concluded attempts).
+# Failure ratio (retry + dead + lost) / concluded attempts
 sum(rate(jobqueue_jobs_processed_total{outcome=~"retry|dead|lost"}[5m]))
-  / clamp_min(sum(rate(jobqueue_jobs_processed_total[5m])), 0.0001)
+  / clamp_min(sum(rate(jobqueue_jobs_processed_total[5m])), 1e-9)
 
-# Handler retry rate and final dead-letter rate.
-sum(rate(jobqueue_jobs_processed_total{outcome="retry"}[5m]))
-rate(jobqueue_dead_letters_total[5m])
-
-# Processing latency percentiles.
+# Latency percentiles
 histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))
-
-# Queue wait and total job time.
 histogram_quantile(0.95, sum by (le) (rate(jobqueue_queue_wait_seconds_bucket[5m])))
 histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_total_seconds_bucket[5m])))
 
-# Ready + scheduled backlog and current dead-letter depth.
+# Queue/backlog state
 sum(jobqueue_queue_depth{state=~"ready_total|scheduled"})
+jobqueue_queue_depth{state="scheduled_due"}
 jobqueue_queue_depth{state="dead"}
 
-# Workers up, jobs in flight, and scheduled jobs due now.
+# Workers and reaper
 count(up{job="jobqueue-workers"} == 1)
 sum(jobqueue_worker_inflight)
-jobqueue_queue_depth{state="scheduled_due"}
-
-# Reaper actions, promotions, and idempotency deduplication.
 sum by (action) (rate(jobqueue_reaped_total[5m]))
-rate(jobqueue_jobs_promoted_total[5m])
+
+# Cluster counters and dedupe
+rate(jobqueue_jobs_enqueued_total[5m])
+rate(jobqueue_jobs_completed_total[5m])
+rate(jobqueue_dead_letters_total[5m])
 rate(jobqueue_idempotency_dedup_total[5m])
 
-# Handler errors by type and exception class.
+# Handler and API errors
 sum by (job_type, error_type) (rate(jobqueue_handler_errors_total[5m]))
-
-# API request rate, 5xx ratio, and p95 latency.
 sum by (status) (rate(jobqueue_api_requests_total[5m]))
 sum(rate(jobqueue_api_requests_total{status=~"5.."}[5m]))
-  / clamp_min(sum(rate(jobqueue_api_requests_total[5m])), 0.0001)
-histogram_quantile(0.95, sum by (le) (rate(jobqueue_api_request_duration_seconds_bucket[5m])))
+  / clamp_min(sum(rate(jobqueue_api_requests_total[5m])), 1e-9)
+
+# Final failures (worker-observed dead + reaper-dead, or cluster counter)
+sum(increase(jobqueue_jobs_processed_total{outcome="dead"}[1h]))
+  + sum(increase(jobqueue_reaped_total{action="dead"}[1h]))
+increase(jobqueue_dead_letters_total[1h])
 ```
 
-### Recording rules and dashboard
+### Upgrade notes
 
-`prometheus/rules.yml` contains ready-to-use recording rules for throughput,
-failure ratio, retries, dead letters, backlog, processing/queue-wait/total-time
-percentiles, reaper actions, promotions, deduplication, handler errors, worker
-health, and API request metrics. Prometheus loads the file through
-`prometheus/prometheus.yml`.
+- Replaced `jobqueue_jobs_total{kind="enqueued|completed|failed"}` with `jobqueue_jobs_enqueued_total`, `jobqueue_jobs_completed_total`, and `jobqueue_failed_attempts_total`.
+- `jobqueue_jobs_processed_total` now includes `priority`; `jobqueue_job_processing_seconds` now includes `outcome`. Existing cross-instance aggregations remain valid; regroup by the added labels if needed.
 
-Open Grafana at http://localhost:3000 (anonymous access is enabled) and choose
-the **Job Queue** dashboard, or go directly to
-http://localhost:3000/d/jobqueue-main. Prometheus is at
-http://localhost:9090 for raw queries and rule inspection.
+### Dashboard
 
-The dashboard includes:
-
-- Queue depth by state, ready depth by priority, and scheduled backlog.
-- Throughput by outcome, failure ratio, and processing latency percentiles.
-- Queue wait and total job time percentiles.
-- Handler retries, reaper actions, dead-letter rates, and background errors.
-- Worker count/availability (from `up`), in-flight jobs, and scheduled due.
-- Enqueued/completed/promoted/deduplicated rates and cluster lifetime counters.
-- API request rate by status, 5xx ratio, and API latency.
-- Handler errors by job type and exception class.
+`prometheus/rules.yml` is loaded by Prometheus; Grafana (http://localhost:3000, anonymous access enabled) provisions the **Job Queue** dashboard (http://localhost:3000/d/jobqueue-main). It visualizes queue depth/backlog, throughput and failure ratios, processing/wait/total latency, retries/reaper/DLQ activity, worker health and inflight concurrency, cluster lifecycle counters, API traffic/errors/latency, and handler errors. Raw Prometheus UI: http://localhost:9090.
 
 ## Configuration
 
