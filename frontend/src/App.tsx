@@ -29,6 +29,7 @@ type Job = {
   status: string
   priority?: string
   payload?: Record<string, unknown>
+  result?: Record<string, unknown>
   attempts?: number
   last_error?: string
   created_at?: number
@@ -65,6 +66,12 @@ function App() {
   const [priority, setPriority] = useState('default')
   const [seconds, setSeconds] = useState('2')
   const [failRate, setFailRate] = useState('0.3')
+  const [reportName, setReportName] = useState('orders')
+  const [reportRows, setReportRows] = useState('100')
+  const [textInput, setTextInput] = useState('')
+  const [emailTo, setEmailTo] = useState('')
+  const [emailSubject, setEmailSubject] = useState('Hello from the job queue')
+  const [emailBody, setEmailBody] = useState('This message was sent by the job queue.')
   const [activeView, setActiveView] = useState('New job')
   const [jobId, setJobId] = useState('')
   const [selectedJob, setSelectedJob] = useState<Job | null>(null)
@@ -105,7 +112,20 @@ function App() {
     const payload =
       taskType === 'sleep'
         ? { seconds: Math.max(0, Number(seconds) || 0) }
-        : { fail_rate: Math.min(1, Math.max(0, Number(failRate) || 0)) }
+        : taskType === 'generate_report'
+          ? {
+              report_name: reportName.trim() || 'orders',
+              rows: Math.max(1, Math.floor(Number(reportRows) || 100)),
+            }
+          : taskType === 'text_stats'
+            ? { text: textInput }
+            : taskType === 'send_email'
+              ? {
+                  to: emailTo.trim(),
+                  subject: emailSubject,
+                  body: emailBody,
+                }
+              : { fail_rate: Math.min(1, Math.max(0, Number(failRate) || 0)) }
 
     try {
       const response = await fetch(`${API}/enqueue`, {
@@ -299,11 +319,95 @@ function App() {
                   >
                     <option value="sleep">Sleep — simulate a task</option>
                     <option value="flaky">Flaky — test failure handling</option>
+                    <option value="generate_report">Report — generate a CSV</option>
+                    <option value="text_stats">Text stats — count characters and words</option>
+                    <option value="send_email">Email — send through SMTP</option>
                   </select>
                   <ChevronDown size={16} />
                 </div>
 
-                <div className="field-row">
+                {taskType === 'generate_report' && (
+                  <div className="field-block">
+                    <label className="field-label" htmlFor="report-name">
+                      Report name
+                    </label>
+                    <input
+                      id="report-name"
+                      value={reportName}
+                      onChange={(event) => setReportName(event.target.value)}
+                      placeholder="orders"
+                      maxLength={50}
+                    />
+                  </div>
+                )}
+
+                {taskType === 'text_stats' && (
+                  <div className="field-block">
+                    <label className="field-label" htmlFor="text-stats-input">
+                      Text
+                    </label>
+                    <textarea
+                      id="text-stats-input"
+                      value={textInput}
+                      onChange={(event) => setTextInput(event.target.value)}
+                      placeholder="Paste text to analyze..."
+                      rows={5}
+                    />
+                  </div>
+                )}
+
+                {taskType === 'send_email' && (
+                  <>
+                    <div className="field-block">
+                      <label className="field-label" htmlFor="email-to">
+                        Recipient
+                      </label>
+                      <input
+                        id="email-to"
+                        type="email"
+                        value={emailTo}
+                        onChange={(event) => setEmailTo(event.target.value)}
+                        placeholder="recipient@example.com"
+                        required
+                      />
+                    </div>
+                    <div className="field-block">
+                      <label className="field-label" htmlFor="email-subject">
+                        Subject
+                      </label>
+                      <input
+                        id="email-subject"
+                        value={emailSubject}
+                        onChange={(event) => setEmailSubject(event.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="field-block">
+                      <label className="field-label" htmlFor="email-body">
+                        Body
+                      </label>
+                      <textarea
+                        id="email-body"
+                        value={emailBody}
+                        onChange={(event) => setEmailBody(event.target.value)}
+                        rows={5}
+                        required
+                      />
+                    </div>
+                    <p className="field-note">
+                      Requires valid SMTP credentials configured on the worker
+                      (SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD).
+                    </p>
+                  </>
+                )}
+
+                <div
+                  className={`field-row ${
+                    taskType === 'text_stats' || taskType === 'send_email'
+                      ? 'single'
+                      : ''
+                  }`}
+                >
                   <div className="field-column">
                     <label className="field-label" htmlFor="priority">
                       Priority
@@ -321,25 +425,33 @@ function App() {
                       <ChevronDown size={16} />
                     </div>
                   </div>
-                  <div className="field-column">
-                    <label className="field-label" htmlFor="task-value">
-                      {taskType === 'sleep' ? 'Duration (seconds)' : 'Failure rate (0–1)'}
-                    </label>
-                    <input
-                      id="task-value"
-                      type="number"
-                      min={0}
-                      max={taskType === 'sleep' ? 60 : 1}
-                      step={taskType === 'sleep' ? 0.5 : 0.1}
-                      value={taskType === 'sleep' ? seconds : failRate}
-                      onChange={(event) =>
-                        taskType === 'sleep'
-                          ? setSeconds(event.target.value)
-                          : setFailRate(event.target.value)
-                      }
-                      required
-                    />
-                  </div>
+                  {taskType !== 'text_stats' && taskType !== 'send_email' && (
+                    <div className="field-column">
+                      <label className="field-label" htmlFor="task-value">
+                        {taskType === 'sleep'
+                          ? 'Duration (seconds)'
+                          : taskType === 'generate_report'
+                            ? 'Rows'
+                            : 'Failure rate (0–1)'}
+                      </label>
+                      <input
+                        id="task-value"
+                        type="number"
+                        min={taskType === 'generate_report' ? 1 : 0}
+                        max={taskType === 'sleep' ? 60 : taskType === 'generate_report' ? 100000 : 1}
+                        step={taskType === 'sleep' ? 0.5 : taskType === 'generate_report' ? 1 : 0.1}
+                        value={taskType === 'sleep' ? seconds : taskType === 'generate_report' ? reportRows : failRate}
+                        onChange={(event) =>
+                          taskType === 'sleep'
+                            ? setSeconds(event.target.value)
+                            : taskType === 'generate_report'
+                              ? setReportRows(event.target.value)
+                              : setFailRate(event.target.value)
+                        }
+                        required
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="composer-bottom">
@@ -554,10 +666,10 @@ function App() {
 
 function StatsGrid({ stats, large = false }: { stats: Stats | null; large?: boolean }) {
   const metrics = [
-    { label: 'Completed', value: stats?.completed, detail: 'Jobs processed', icon: CheckCircle2 },
-    { label: 'Waiting', value: stats?.ready_total, detail: 'Ready in queue', icon: Clock3 },
+    { label: 'Completed', value: stats?.completed, detail: stats ? `${stats.enqueued.toLocaleString()} enqueued` : 'Jobs processed', icon: CheckCircle2 },
+    { label: 'Waiting', value: stats?.ready_total, detail: stats ? `${stats.scheduled.toLocaleString()} scheduled` : 'Ready in queue', icon: Clock3 },
     { label: 'In progress', value: stats?.inflight, detail: 'Currently claimed', icon: Activity },
-    { label: 'Dead-lettered', value: stats?.dead, detail: 'Permanently failed', icon: CircleAlert },
+    { label: 'Dead-lettered', value: stats?.dead, detail: stats ? `${stats.failed.toLocaleString()} failed attempts` : 'Permanently failed', icon: CircleAlert },
   ]
 
   return (
@@ -614,6 +726,12 @@ function JobResult({ job, onRefresh }: { job: Job; onRefresh: () => void }) {
         <div><span>Attempts</span><strong>{job.attempts ?? 0}</strong></div>
         <div><span>Created</span><strong>{formatTime(job.created_at)}</strong></div>
       </div>
+      {job.result && (
+        <div className="job-result-data">
+          <span>Handler result</span>
+          <pre>{JSON.stringify(job.result, null, 2)}</pre>
+        </div>
+      )}
       {job.last_error && (
         <div className="job-error">
           <CircleAlert size={15} />

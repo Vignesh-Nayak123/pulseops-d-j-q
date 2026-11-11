@@ -7,7 +7,7 @@
   "tags": ["jobqueue"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "time": { "from": "now-15m", "to": "now" },
   "refresh": "5s",
   "templating": { "list": [] },
@@ -15,6 +15,7 @@
     {
       "id": 1,
       "title": "Queue depth by state",
+      "description": "Cluster-wide Redis state sampled by the API on each scrape. ready_total is the sum of ready:<priority>.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
@@ -24,7 +25,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "jobqueue_queue_depth{state=~\"ready_total|scheduled|inflight|dead\"}",
+          "expr": "jobqueue_queue_depth{state=~\"ready_total|scheduled|scheduled_due|inflight|dead\"}",
           "legendFormat": "{{state}}"
         }
       ]
@@ -32,6 +33,7 @@
     {
       "id": 2,
       "title": "Throughput (jobs/sec) by outcome",
+      "description": "Concluded delivery attempts across all worker replicas. Retries are attempts, not final jobs.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
@@ -55,6 +57,7 @@
     {
       "id": 3,
       "title": "Processing latency (p50 / p95 / p99)",
+      "description": "Handler execution time per delivery attempt, summed across workers.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
@@ -64,26 +67,27 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))",
           "legendFormat": "p95"
         },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))",
           "legendFormat": "p99"
         }
       ]
     },
     {
       "id": 4,
-      "title": "Failure rate (percent of outcomes)",
+      "title": "Failure ratio (retry + dead + lost)",
+      "description": "Share of concluded delivery attempts that were not successful. A retry is an attempt, not a final job failure.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
@@ -93,14 +97,15 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(jobqueue_jobs_processed_total{outcome=~\"retry|dead|lost\"}[1m])) / clamp_min(sum(rate(jobqueue_jobs_processed_total[1m])), 0.0001)",
-          "legendFormat": "failure rate"
+          "expr": "sum(rate(jobqueue_jobs_processed_total{outcome=~\"retry|dead|lost\"}[5m])) / clamp_min(sum(rate(jobqueue_jobs_processed_total[5m])), 0.0001)",
+          "legendFormat": "failure ratio"
         }
       ]
     },
     {
       "id": 5,
       "title": "Ready depth by priority",
+      "description": "Current ready jobs per priority. Only ready queues are priority-indexed in Redis.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
@@ -117,24 +122,336 @@
     },
     {
       "id": 6,
-      "title": "Live workers and concurrency",
+      "title": "Workers and concurrency",
+      "description": "Worker availability comes from Prometheus target health; in-flight comes from worker-local gauges.",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name", "colorMode": "value" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name", "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "count(jobqueue_worker_inflight)",
-          "legendFormat": "workers up"
+          "expr": "count(up{job=\"jobqueue-workers\"} == 1)",
+          "legendFormat": "workers up",
+          "instant": true
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "count(up{job=\"jobqueue-workers\"} == 0)",
+          "legendFormat": "workers down",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(jobqueue_worker_inflight)",
-          "legendFormat": "jobs in flight"
+          "legendFormat": "jobs in flight",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(jobqueue_queue_depth{state=\"scheduled_due\"})",
+          "legendFormat": "scheduled due",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Queue wait and total job time (p50 / p95)",
+      "description": "Queue wait is enqueue-to-start and includes intentional delay/backoff. Total time is enqueue-to-successful-completion.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 0 }, "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(jobqueue_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "queue wait p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(jobqueue_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "queue wait p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(jobqueue_job_total_seconds_bucket[5m])))",
+          "legendFormat": "total time p50"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_total_seconds_bucket[5m])))",
+          "legendFormat": "total time p95"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Retries, reaper actions, and dead letters",
+      "description": "Handler retries and visibility-timeout requeues are different events. Dead letters include both exhausted handler retries and reaper give-ups.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_jobs_retried_total[5m])",
+          "legendFormat": "handler retries"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (action) (rate(jobqueue_reaped_total[5m]))",
+          "legendFormat": "reaper {{action}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_dead_letters_total[5m])",
+          "legendFormat": "dead letters"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_failed_attempts_total[5m])",
+          "legendFormat": "failed attempts"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Reaper actions and background errors",
+      "description": "Visibility-timeout handling by all reaper threads plus reaper/promoter loop errors.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (action) (rate(jobqueue_reaped_total[5m]))",
+          "legendFormat": "reaped {{action}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (loop) (rate(jobqueue_background_errors_total[5m]))",
+          "legendFormat": "{{loop}} errors"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Enqueued, completed, promotions, and deduplication",
+      "description": "Cluster-wide lifetime counters maintained in Redis. Deduplicated requests are not new jobs.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_jobs_enqueued_total[5m])",
+          "legendFormat": "enqueued"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_jobs_completed_total[5m])",
+          "legendFormat": "completed"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_jobs_promoted_total[5m])",
+          "legendFormat": "promoted"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(jobqueue_idempotency_dedup_total[5m])",
+          "legendFormat": "idempotency dedupes"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "API request rate by status",
+      "description": "Requests handled by the API process. /metrics scrapes are excluded to avoid self-observability noise.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status) (rate(jobqueue_api_requests_total[1m]))",
+          "legendFormat": "{{status}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (path) (rate(jobqueue_api_requests_total[5m]))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "API latency (p95)",
+      "description": "API request latency by route pattern. Job IDs never appear as labels.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 0 }, "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (path, le) (rate(jobqueue_api_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path}} p95"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "API error ratio (5xx)",
+      "description": "5xx responses divided by all instrumented API responses.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 47 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(jobqueue_api_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(jobqueue_api_requests_total[5m])), 0.0001)",
+          "legendFormat": "5xx ratio"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Handler errors by type",
+      "description": "Exception class names only; messages and payloads never become labels.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 47 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job_type, error_type) (rate(jobqueue_handler_errors_total[5m]))",
+          "legendFormat": "{{job_type}} / {{error_type}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Scheduled backlog",
+      "description": "scheduled includes future delayed jobs and backoff retries; scheduled_due are due now and awaiting promotion.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 55 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_queue_depth{state=~\"scheduled|scheduled_due\"}",
+          "legendFormat": "{{state}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(jobqueue_queue_depth{state=~\"ready_total|scheduled\"})",
+          "legendFormat": "backlog (ready + scheduled)"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Cluster lifetime counters",
+      "description": "Canonical Redis-backed counters. They reset only if Redis data is lost, unlike worker-local counters that reset on worker restart.",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 55 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name", "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_jobs_enqueued_total",
+          "legendFormat": "enqueued",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_jobs_completed_total",
+          "legendFormat": "completed",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_failed_attempts_total",
+          "legendFormat": "failed attempts",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_jobs_retried_total",
+          "legendFormat": "retried",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_dead_letters_total",
+          "legendFormat": "dead letters",
+          "instant": true
+        },
+        {
+          "refId": "F",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_jobs_promoted_total",
+          "legendFormat": "promoted",
+          "instant": true
+        },
+        {
+          "refId": "G",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "jobqueue_idempotency_dedup_total",
+          "legendFormat": "deduplicated",
+          "instant": true
         }
       ]
     }

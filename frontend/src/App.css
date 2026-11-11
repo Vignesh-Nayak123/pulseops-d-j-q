@@ -349,6 +349,50 @@
   padding-right: 10px;
 }
 
+.field-block {
+  margin-top: 16px;
+}
+
+.field-block input,
+.field-block textarea {
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #333333;
+  outline: none;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.field-block input {
+  height: 39px;
+}
+
+.field-block textarea {
+  min-height: 96px;
+  padding: 10px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.field-block input:focus,
+.field-block textarea:focus {
+  border-color: #bcbcbc;
+}
+
+.field-row.single {
+  grid-template-columns: 1fr;
+}
+
+.field-note {
+  margin: 9px 0 0;
+  color: #8b8b8b;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .composer-bottom {
   display: flex;
   align-items: center;
@@ -681,6 +725,29 @@
   color: #3a3a3a;
   font-size: 11px;
   font-weight: 550;
+}
+
+.job-result-data {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.job-result-data>span {
+  color: #898989;
+  font-size: 10px;
+}
+
+.job-result-data pre {
+  margin: 0;
+  padding: 10px;
+  overflow-x: auto;
+  border: 1px solid #eeeeee;
+  border-radius: 7px;
+  background: #fafafa;
+  color: #3a3a3a;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .job-error {

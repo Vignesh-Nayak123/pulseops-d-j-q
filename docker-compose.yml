@@ -45,6 +45,20 @@ services:
       BACKOFF_BASE: "2"
       BACKOFF_MAX: "300"
       WORKER_METRICS_PORT: "9100"
+      # SMTP settings for the send_email job. Values come from the Compose
+      # project's .env file or the host environment; defaults target Mailpit
+      # on the host at host.docker.internal:1025 with STARTTLS disabled.
+      SMTP_HOST: "${SMTP_HOST:-host.docker.internal}"
+      SMTP_PORT: "${SMTP_PORT:-1025}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-no-reply@localhost}"
+      SMTP_STARTTLS: "${SMTP_STARTTLS:-false}"
+      SMTP_TIMEOUT: "${SMTP_TIMEOUT:-10}"
+    # Generated reports land in ./reports on the host and survive recreating
+    # containers. All worker replicas write to the same directory.
+    volumes:
+      - ./reports:/app/reports
     # Three workers compete for jobs out of the box. Scale with:
     #   docker compose up --scale worker=10
     deploy:
@@ -57,6 +71,7 @@ services:
     image: prom/prometheus:v2.54.1
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
     ports:
       - "9090:9090"
     depends_on:

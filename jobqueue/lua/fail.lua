@@ -16,7 +16,9 @@
 -- KEYS[2]: job-hash key, e.g. "job:<id>".
 -- KEYS[3]: scheduled key (ZSET, score = run-at epoch) for the retry path.
 -- KEYS[4]: dead-letter key (LIST) for the give-up path.
--- KEYS[5]: failed counter key.
+-- KEYS[5]: failed-attempt counter key.
+-- KEYS[6]: retried counter key (incremented on the retry path).
+-- KEYS[7]: dead-letter counter key (incremented on the give-up path).
 -- ARGV[1]: job id.
 -- ARGV[2]: max attempts.
 -- ARGV[3]: backoff base seconds.
@@ -32,6 +34,8 @@ local job_key = KEYS[2]
 local scheduled_key = KEYS[3]
 local dead_key = KEYS[4]
 local failed_key = KEYS[5]
+local retried_key = KEYS[6]
+local dead_counter_key = KEYS[7]
 
 local job_id = ARGV[1]
 local max_attempts = tonumber(ARGV[2])
@@ -56,6 +60,7 @@ if attempts >= max_attempts then
   -- Out of retries. Park it in the dead-letter list for inspection.
   redis.call("HSET", job_key, "status", "dead")
   redis.call("LPUSH", dead_key, job_id)
+  redis.call("INCR", dead_counter_key)
   redis.call("EXPIRE", job_key, ttl)
   return "dead"
 end
@@ -72,4 +77,5 @@ local retry_at = now + delay
 -- once retry_at arrives.
 redis.call("HSET", job_key, "status", "scheduled")
 redis.call("ZADD", scheduled_key, retry_at, job_id)
+redis.call("INCR", retried_key)
 return "retry"

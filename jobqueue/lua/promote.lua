@@ -8,6 +8,7 @@
 --
 -- KEYS[1]: scheduled key (ZSET, score = run-at epoch).
 -- KEYS[2]: sequence key (counter that scores ready-queue order, FIFO).
+-- KEYS[3]: promoted counter key.
 -- ARGV[1]: now (unix epoch seconds).
 -- ARGV[2]: job-hash key prefix, e.g. "job:".
 -- ARGV[3]: ready-queue key prefix, e.g. "queue:ready:".
@@ -18,6 +19,7 @@
 
 local scheduled_key = KEYS[1]
 local seq_key = KEYS[2]
+local promoted_key = KEYS[3]
 local now = ARGV[1]
 local job_prefix = ARGV[2]
 local ready_prefix = ARGV[3]
@@ -41,6 +43,7 @@ for _, job_id in ipairs(due) do
     local seq = redis.call("INCR", seq_key)
     redis.call("ZADD", ready_prefix .. priority, seq, job_id)
     redis.call("HSET", job_key, "status", "ready")
+    redis.call("INCR", promoted_key)
     promoted = promoted + 1
   end
 end

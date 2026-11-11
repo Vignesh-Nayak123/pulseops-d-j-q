@@ -5,7 +5,8 @@ Endpoints:
   GET  /jobs/<id>     fetch a job's current status and record
   GET  /stats         queue depth, in-flight, completed, failed, etc.
   GET  /healthz       liveness probe, also pings Redis
-  GET  /metrics       Prometheus exposition (cluster-wide queue depth)
+  GET  /metrics       Prometheus exposition (cluster-wide queue state and API
+                      request metrics)
 
 The API is stateless. All state lives in Redis, so you can run several API
 replicas behind a load balancer if you want; this demo runs one.
@@ -13,16 +14,23 @@ replicas behind a load balancer if you want; this demo runs one.
 
 import time
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, REGISTRY
 
 from . import config, jobs, queue
+from . import metrics as prom_metrics
 from .metrics import QueueDepthCollector
 from .redis_client import get_client
 from flask_cors import CORS
 
+# Guard against duplicate collector registration when create_app() is called
+# more than once in one process (tests, for example).
+_COLLECTOR_REGISTERED = False
+
 
 def create_app():
+    global _COLLECTOR_REGISTERED
+
     app = Flask(__name__)
     CORS(
         app,
@@ -37,7 +45,34 @@ def create_app():
     )
     # Register the cluster-wide queue-depth collector once, on the API process.
     # Workers expose their own per-process metrics on a separate port instead.
-    REGISTRY.register(QueueDepthCollector(queue))
+    if not _COLLECTOR_REGISTERED:
+        REGISTRY.register(QueueDepthCollector(queue))
+        _COLLECTOR_REGISTERED = True
+
+    @app.before_request
+    def _start_request_metrics():
+        # Do not let Prometheus scrapes inflate the API request counters or
+        # latency histogram with self-observability traffic.
+        if request.endpoint == "metrics":
+            return None
+        g._metrics_started = time.perf_counter()
+        return None
+
+    @app.after_request
+    def _finish_request_metrics(response):
+        started = getattr(g, "_metrics_started", None)
+        if started is None:
+            return response
+        # Use the Flask route pattern, never the concrete URL. /jobs/<job_id>
+        # stays bounded even though every request has a different id.
+        path = request.url_rule.rule if request.url_rule is not None else "unmatched"
+        method = prom_metrics.method_label(request.method)
+        status = str(response.status_code)
+        prom_metrics.API_REQUESTS.labels(method=method, path=path, status=status).inc()
+        prom_metrics.API_REQUEST_LATENCY.labels(method=method, path=path).observe(
+            time.perf_counter() - started
+        )
+        return response
 
     @app.post("/enqueue")
     def enqueue():

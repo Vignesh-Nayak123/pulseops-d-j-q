@@ -23,7 +23,7 @@ import time
 from prometheus_client import start_http_server
 
 from . import config, jobs, queue
-from . import metrics
+from . import metrics, worker_metrics
 
 # Set when a shutdown signal arrives; every loop checks it to exit cleanly.
 _stop = threading.Event()
@@ -41,12 +41,13 @@ def _reaper_loop():
         try:
             requeued, dead = queue.reap()
             if requeued:
-                metrics.REAPED.labels(action="requeued").inc(requeued)
+                worker_metrics.REAPED.labels(action="requeued").inc(requeued)
                 _log("reaper requeued %d job(s)" % requeued)
             if dead:
-                metrics.REAPED.labels(action="dead").inc(dead)
+                worker_metrics.REAPED.labels(action="dead").inc(dead)
                 _log("reaper dead-lettered %d timed-out job(s)" % dead)
         except Exception as exc:  # never let the loop die on a transient error
+            worker_metrics.BACKGROUND_ERRORS.labels(loop="reaper").inc()
             _log("reaper error: %s" % exc)
         _stop.wait(config.REAP_INTERVAL)
 
@@ -59,12 +60,18 @@ def _promoter_loop():
             if promoted:
                 _log("promoter moved %d job(s) to ready" % promoted)
         except Exception as exc:
+            worker_metrics.BACKGROUND_ERRORS.labels(loop="promoter").inc()
             _log("promoter error: %s" % exc)
         _stop.wait(config.PROMOTE_INTERVAL)
 
 
 def _process(job_id):
-    """Run a single claimed job and record the outcome."""
+    """Run a single claimed job and record the outcome.
+
+    All labels are bounded: the job type is mapped to a registered type or
+    ``unregistered``, the priority to a configured priority or ``unknown``, and
+    handler failures use only the exception class name.
+    """
     job = queue.get_job(job_id)
     if job is None:
         # Hash vanished (expired or manually deleted). Drop the lease so it does
@@ -74,33 +81,87 @@ def _process(job_id):
         return
 
     job_type = job["type"]
+    type_label = metrics.job_type_label(job_type)
+    priority = metrics.priority_label(job.get("priority"))
     handler = jobs.get_handler(job_type)
 
-    metrics.WORKER_INFLIGHT.inc()
-    started = time.time()
+    started_wall = time.time()
     try:
-        if handler is None:
-            # No handler registered for this type. Treat as a failure so the
-            # retry/dead-letter machinery handles it rather than losing the job.
-            raise RuntimeError("no handler registered for job type %r" % job_type)
+        created_at = float(job.get("created_at", started_wall))
+    except (TypeError, ValueError):
+        created_at = started_wall
+    try:
+        attempts_before = int(job.get("attempts", 0))
+    except (TypeError, ValueError):
+        attempts_before = 0
 
-        handler(job["payload"])
-        # Handler succeeded. ack returns False if our lease had already expired
-        # and the reaper took the job back, in which case another worker owns it
-        # now and we must not count it as our completion.
-        if queue.ack(job_id):
-            metrics.JOBS_PROCESSED.labels(job_type=job_type, outcome="completed").inc()
-            _log("completed %s (%s)" % (job_id, job_type))
+    worker_metrics.WORKER_INFLIGHT.inc()
+    worker_metrics.QUEUE_WAIT.labels(
+        job_type=type_label, priority=priority
+    ).observe(max(0.0, started_wall - created_at))
+
+    started = time.perf_counter()
+    outcome = "error"
+    try:
+        try:
+            if handler is None:
+                # No handler registered for this type. Treat as a failure so the
+                # retry/dead-letter machinery handles it rather than losing it.
+                raise RuntimeError("no handler registered for job type %r" % job_type)
+
+            # Handlers receive the stored payload plus the job id. The id lets a
+            # handler include it in output filenames without changing the
+            # handler signature used by every existing job type.
+            payload = dict(job["payload"])
+            payload["_job_id"] = job_id
+            result = handler(payload)
+        except Exception as exc:
+            worker_metrics.HANDLER_ERRORS.labels(
+                job_type=type_label,
+                error_type=metrics.error_type_label(exc),
+            ).inc()
+            outcome = queue.fail(job_id, exc)
+            worker_metrics.JOBS_PROCESSED.labels(
+                job_type=type_label, outcome=outcome, priority=priority
+            ).inc()
+            if outcome == "retry":
+                worker_metrics.RETRY_DELAY.labels(job_type=type_label).observe(
+                    queue.retry_delay_seconds(attempts_before)
+                )
+            _log("failed %s (%s): %s -> %s" % (job_id, job_type, exc, outcome))
         else:
-            metrics.JOBS_PROCESSED.labels(job_type=job_type, outcome="lost").inc()
-            _log("completed %s but lease was lost, not acked" % job_id)
-    except Exception as exc:
-        outcome = queue.fail(job_id, exc)
-        metrics.JOBS_PROCESSED.labels(job_type=job_type, outcome=outcome).inc()
-        _log("failed %s (%s): %s -> %s" % (job_id, job_type, exc, outcome))
+            # Handler succeeded. ack returns False if our lease had already
+            # expired and the reaper took the job back, in which case another
+            # worker owns it now and we must not count it as our completion.
+            try:
+                acked = queue.ack(job_id, result)
+            except Exception as exc:
+                outcome = queue.fail(job_id, exc)
+                worker_metrics.JOBS_PROCESSED.labels(
+                    job_type=type_label, outcome=outcome, priority=priority
+                ).inc()
+                _log("ack failed for %s (%s): %s -> %s" % (job_id, job_type, exc, outcome))
+            else:
+                if acked:
+                    outcome = "completed"
+                    worker_metrics.JOBS_PROCESSED.labels(
+                        job_type=type_label, outcome=outcome, priority=priority
+                    ).inc()
+                    worker_metrics.JOB_TOTAL_TIME.labels(
+                        job_type=type_label, priority=priority
+                    ).observe(max(0.0, time.time() - created_at))
+                    _log("completed %s (%s)" % (job_id, job_type))
+                else:
+                    outcome = "lost"
+                    worker_metrics.JOBS_PROCESSED.labels(
+                        job_type=type_label, outcome=outcome, priority=priority
+                    ).inc()
+                    _log("completed %s but lease was lost, not acked" % job_id)
     finally:
-        metrics.JOB_LATENCY.labels(job_type=job_type).observe(time.time() - started)
-        metrics.WORKER_INFLIGHT.dec()
+        worker_metrics.JOB_LATENCY.labels(
+            job_type=type_label, outcome=outcome
+        ).observe(time.perf_counter() - started)
+        worker_metrics.WORKER_INFLIGHT.dec()
 
 
 def _handle_signal(signum, frame):

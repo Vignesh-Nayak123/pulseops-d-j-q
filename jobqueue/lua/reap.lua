@@ -20,7 +20,8 @@
 -- KEYS[1]: inflight key (ZSET, score = visibility deadline).
 -- KEYS[2]: sequence key (scores ready-queue FIFO order).
 -- KEYS[3]: dead-letter key (LIST).
--- KEYS[4]: failed counter key.
+-- KEYS[4]: failed-attempt counter key.
+-- KEYS[5]: dead-letter counter key.
 -- ARGV[1]: now (unix epoch seconds).
 -- ARGV[2]: job-hash key prefix, e.g. "job:".
 -- ARGV[3]: ready-queue key prefix, e.g. "queue:ready:".
@@ -35,6 +36,7 @@ local inflight_key = KEYS[1]
 local seq_key = KEYS[2]
 local dead_key = KEYS[3]
 local failed_key = KEYS[4]
+local dead_counter_key = KEYS[5]
 
 local now = ARGV[1]
 local job_prefix = ARGV[2]
@@ -61,6 +63,7 @@ for _, job_id in ipairs(expired) do
       redis.call("HSET", job_key, "status", "dead", "last_error", "visibility timeout, max attempts reached")
       redis.call("LPUSH", dead_key, job_id)
       redis.call("INCR", failed_key)
+      redis.call("INCR", dead_counter_key)
       redis.call("EXPIRE", job_key, ttl)
       dead = dead + 1
     else
@@ -72,6 +75,10 @@ for _, job_id in ipairs(expired) do
       local seq = redis.call("INCR", seq_key)
       redis.call("ZADD", ready_prefix .. priority, seq, job_id)
       redis.call("HSET", job_key, "status", "ready", "last_error", "visibility timeout, requeued")
+      -- A visibility timeout is a failed delivery attempt even when the job is
+      -- requeued, so it belongs in the same failed-attempt counter that
+      -- fail.lua increments.
+      redis.call("INCR", failed_key)
       requeued = requeued + 1
     end
   end

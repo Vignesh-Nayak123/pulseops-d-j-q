@@ -2,7 +2,9 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 *.egg-info/
+*.egg
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -12,6 +14,8 @@ __pycache__/
 .coverage*
 coverage.xml
 htmlcov/
+build/
+dist/
 
 # Virtual environments
 .venv/
@@ -23,15 +27,36 @@ env/
 .env.*
 !.env.example
 
+# Node / frontend artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
 # Local data files (redis dumps, logs, scratch output)
 *.rdb
 *.aof
 *.log
+logs/
 data/
 dump.rdb
+*.tmp
+*.temp
+
+# Generated reports (keep the directory itself)
+reports/*
+!reports/.gitkeep
 
 # Editor and OS noise
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
+.kilo/

@@ -16,6 +16,10 @@ def _float(name, default):
     return float(os.environ.get(name, default))
 
 
+def _bool(name, default):
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Redis connection. In compose this resolves to the "redis" service name.
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -53,3 +57,23 @@ RESULT_TTL = _int("RESULT_TTL", 3600)
 # Port the metrics endpoint listens on inside a worker process. Each worker
 # container exposes its own so Prometheus can scrape per-worker series.
 WORKER_METRICS_PORT = _int("WORKER_METRICS_PORT", 9100)
+
+# Directory where handlers write generated files. Defaults to reports/ at the
+# project root; docker-compose bind-mounts it to the host so files survive
+# container recreation.
+REPORTS_DIR = os.environ.get(
+    "REPORTS_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reports"),
+)
+
+# SMTP settings for the send_email handler. Compose passes host.docker.internal
+# so workers reach Mailpit running on the Docker host; direct non-Docker runs
+# fall back to localhost. Set these from the environment (or .env for Compose)
+# to use a real provider.
+SMTP_HOST = os.environ.get("SMTP_HOST", "localhost")
+SMTP_PORT = _int("SMTP_PORT", 1025)
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "no-reply@localhost")
+SMTP_STARTTLS = _bool("SMTP_STARTTLS", False)
+SMTP_TIMEOUT = _float("SMTP_TIMEOUT", 10.0)

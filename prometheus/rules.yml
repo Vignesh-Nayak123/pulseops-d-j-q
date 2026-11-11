@@ -1,0 +1,118 @@
+# Recording rules for the job queue dashboard and ad-hoc PromQL.
+#
+# Worker metrics are process-local, so every aggregation below sums or counts
+# across worker instances. Cluster-wide counters come from the API collector
+# and already represent the whole Redis-backed cluster.
+groups:
+  - name: jobqueue.recording
+    rules:
+      # --- Throughput and failures -----------------------------------------
+      - record: jobqueue:jobs_processed:rate5m
+        expr: sum by (job_type, outcome) (rate(jobqueue_jobs_processed_total[5m]))
+
+      - record: jobqueue:throughput:rate5m
+        expr: sum(rate(jobqueue_jobs_processed_total[5m]))
+
+      - record: jobqueue:failure_ratio:rate5m
+        expr: |
+          sum(rate(jobqueue_jobs_processed_total{outcome=~"retry|dead|lost"}[5m]))
+          /
+          clamp_min(sum(rate(jobqueue_jobs_processed_total[5m])), 1e-9)
+
+      - record: jobqueue:retry:rate5m
+        expr: sum(rate(jobqueue_jobs_processed_total{outcome="retry"}[5m]))
+
+      - record: jobqueue:dead_letters:rate5m
+        expr: rate(jobqueue_dead_letters_total[5m])
+
+      - record: jobqueue:failed_attempts:rate5m
+        expr: rate(jobqueue_failed_attempts_total[5m])
+
+      - record: jobqueue:handler_errors:rate5m
+        expr: sum by (job_type, error_type) (rate(jobqueue_handler_errors_total[5m]))
+
+      # --- Queue state ------------------------------------------------------
+      - record: jobqueue:queue_backlog:sum
+        expr: sum(jobqueue_queue_depth{state=~"ready_total|scheduled"})
+
+      - record: jobqueue:queue_outstanding:sum
+        expr: sum(jobqueue_queue_depth{state=~"ready_total|scheduled|inflight"})
+
+      - record: jobqueue:queue_work_in_progress:sum
+        expr: sum(jobqueue_queue_depth{state="inflight"})
+
+      - record: jobqueue:queue_scheduled_due:sum
+        expr: sum(jobqueue_queue_depth{state="scheduled_due"})
+
+      - record: jobqueue:queue_dead_depth:sum
+        expr: sum(jobqueue_queue_depth{state="dead"})
+
+      # --- Latency ----------------------------------------------------------
+      - record: jobqueue:processing_latency:p50_5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))
+
+      - record: jobqueue:processing_latency:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))
+
+      - record: jobqueue:processing_latency:p99_5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(jobqueue_job_processing_seconds_bucket[5m])))
+
+      - record: jobqueue:queue_wait:p50_5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(jobqueue_queue_wait_seconds_bucket[5m])))
+
+      - record: jobqueue:queue_wait:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(jobqueue_queue_wait_seconds_bucket[5m])))
+
+      - record: jobqueue:job_total_time:p50_5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(jobqueue_job_total_seconds_bucket[5m])))
+
+      - record: jobqueue:job_total_time:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(jobqueue_job_total_seconds_bucket[5m])))
+
+      - record: jobqueue:retry_delay:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(jobqueue_retry_delay_seconds_bucket[5m])))
+
+      # --- Worker and reaper health ----------------------------------------
+      - record: jobqueue:workers_up:sum
+        expr: count(up{job="jobqueue-workers"} == 1)
+
+      - record: jobqueue:workers_down:sum
+        expr: count(up{job="jobqueue-workers"} == 0)
+
+      - record: jobqueue:workers_inflight:sum
+        expr: sum(jobqueue_worker_inflight)
+
+      - record: jobqueue:reaped:rate5m
+        expr: sum by (action) (rate(jobqueue_reaped_total[5m]))
+
+      - record: jobqueue:background_errors:rate5m
+        expr: sum by (loop) (rate(jobqueue_background_errors_total[5m]))
+
+      # --- Cluster-wide lifetime counters ----------------------------------
+      - record: jobqueue:jobs_enqueued:rate5m
+        expr: rate(jobqueue_jobs_enqueued_total[5m])
+
+      - record: jobqueue:jobs_completed:rate5m
+        expr: rate(jobqueue_jobs_completed_total[5m])
+
+      - record: jobqueue:jobs_retried:rate5m
+        expr: rate(jobqueue_jobs_retried_total[5m])
+
+      - record: jobqueue:promotions:rate5m
+        expr: rate(jobqueue_jobs_promoted_total[5m])
+
+      - record: jobqueue:idempotency_dedup:rate5m
+        expr: rate(jobqueue_idempotency_dedup_total[5m])
+
+      # --- API --------------------------------------------------------------
+      - record: jobqueue:api_requests:rate5m
+        expr: sum by (status) (rate(jobqueue_api_requests_total[5m]))
+
+      - record: jobqueue:api_error_ratio:rate5m
+        expr: |
+          sum(rate(jobqueue_api_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(jobqueue_api_requests_total[5m])), 1e-9)
+
+      - record: jobqueue:api_latency:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(jobqueue_api_request_duration_seconds_bucket[5m])))

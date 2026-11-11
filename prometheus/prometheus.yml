@@ -6,6 +6,11 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
+# Recording rules used by the dashboard and ad-hoc PromQL. The file is
+# bind-mounted into the Prometheus container by docker-compose.yml.
+rule_files:
+  - /etc/prometheus/rules.yml
+
 scrape_configs:
   # The API exposes the cluster-wide queue depth collector on /metrics.
   - job_name: jobqueue-api

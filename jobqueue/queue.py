@@ -14,7 +14,14 @@ Key layout:
   queue:seq              STRING monotonic counter used to score ready queues.
   idempotency:<key>      STRING -> job id, written with NX so a duplicate
                                 enqueue becomes a no-op.
-  stats:enqueued/completed/failed  STRING counters for the /stats endpoint.
+  stats:enqueued         STRING  new jobs created (dedupes excluded).
+  stats:completed        STRING  jobs acknowledged as completed.
+  stats:failed           STRING  failed delivery attempts (handler failures
+                                 and visibility timeouts).
+  stats:retried          STRING  handler failures scheduled for backoff retry.
+  stats:dead             STRING  jobs moved to the dead-letter list.
+  stats:promoted         STRING  scheduled jobs moved into a ready queue.
+  stats:deduplicated     STRING  idempotent enqueue requests deduplicated.
 """
 
 import json
@@ -36,6 +43,10 @@ IDEMPOTENCY_PREFIX = "idempotency:"
 STAT_ENQUEUED = "stats:enqueued"
 STAT_COMPLETED = "stats:completed"
 STAT_FAILED = "stats:failed"
+STAT_RETRIED = "stats:retried"
+STAT_DEAD_LETTERS = "stats:dead"
+STAT_PROMOTED = "stats:promoted"
+STAT_DEDUPLICATED = "stats:deduplicated"
 
 
 def _job_key(job_id):
@@ -95,6 +106,7 @@ def enqueue(job_type, payload=None, priority=None, delay_until=None, idempotency
             # existing should be set, but guard against a race where it expired
             # between our SET and GET by falling through to a fresh enqueue.
             if existing:
+                r.incr(STAT_DEDUPLICATED)
                 return existing, False
 
     now = _now()
@@ -134,6 +146,8 @@ def get_job(job_id):
         return None
     # Decode the fields the API and callers care about back into native types.
     raw["payload"] = json.loads(raw.get("payload", "{}"))
+    if raw.get("result"):
+        raw["result"] = json.loads(raw["result"])
     for field in ("attempts",):
         if field in raw:
             raw[field] = int(raw[field])
@@ -156,14 +170,20 @@ def claim():
     return result  # job id string, or None when every ready queue was empty
 
 
-def ack(job_id):
-    """Mark a claimed job completed. Returns True if this worker still owned it."""
+def ack(job_id, result=None):
+    """Mark a claimed job completed. Returns True if this worker still owned it.
+
+    The optional handler result is stored as JSON on the job record so callers
+    of GET /jobs/<id> can see it. None leaves the record unchanged, preserving
+    the existing response shape for handlers that return nothing.
+    """
     now = _now()
-    result = _ack_script(
+    result_json = json.dumps(result) if result is not None else ""
+    acked = _ack_script(
         keys=[INFLIGHT_KEY, _job_key(job_id), STAT_COMPLETED],
-        args=[now, config.RESULT_TTL, job_id],
+        args=[now, config.RESULT_TTL, job_id, result_json],
     )
-    return result == 1
+    return acked == 1
 
 
 def fail(job_id, error):
@@ -172,7 +192,15 @@ def fail(job_id, error):
     MAX_ATTEMPTS. Returns one of 'retry', 'dead', 'lost'."""
     now = _now()
     result = _fail_script(
-        keys=[INFLIGHT_KEY, _job_key(job_id), SCHEDULED_KEY, DEAD_KEY, STAT_FAILED],
+        keys=[
+            INFLIGHT_KEY,
+            _job_key(job_id),
+            SCHEDULED_KEY,
+            DEAD_KEY,
+            STAT_FAILED,
+            STAT_RETRIED,
+            STAT_DEAD_LETTERS,
+        ],
         args=[job_id, config.MAX_ATTEMPTS, config.BACKOFF_BASE, config.BACKOFF_MAX,
               now, str(error), config.RESULT_TTL],
     )
@@ -183,7 +211,7 @@ def promote(limit=200):
     """Move due scheduled jobs into their ready queues. Returns count promoted."""
     now = _now()
     return _promote_script(
-        keys=[SCHEDULED_KEY, SEQ_KEY],
+        keys=[SCHEDULED_KEY, SEQ_KEY, STAT_PROMOTED],
         args=[now, JOB_PREFIX, READY_PREFIX, config.DEFAULT_PRIORITY, limit],
     )
 
@@ -192,37 +220,75 @@ def reap(limit=200):
     """Requeue jobs whose visibility lease expired. Returns (requeued, dead)."""
     now = _now()
     requeued, dead = _reap_script(
-        keys=[INFLIGHT_KEY, SEQ_KEY, DEAD_KEY, STAT_FAILED],
+        keys=[INFLIGHT_KEY, SEQ_KEY, DEAD_KEY, STAT_FAILED, STAT_DEAD_LETTERS],
         args=[now, JOB_PREFIX, READY_PREFIX, config.DEFAULT_PRIORITY,
               config.MAX_ATTEMPTS, config.RESULT_TTL, limit],
     )
     return requeued, dead
 
 
+def retry_delay_seconds(attempts_before):
+    """Return the backoff delay fail.lua will schedule for the next retry.
+
+    ``attempts_before`` is the attempt count read before the failed delivery is
+    recorded. fail.lua increments the counter first, then uses
+    ``BACKOFF_BASE * 2 ** (attempts - 1)``, which is the same value as
+    ``BACKOFF_BASE * 2 ** attempts_before`` here.
+    """
+    try:
+        attempts_before = max(0, int(attempts_before))
+    except (TypeError, ValueError):
+        attempts_before = 0
+    return min(config.BACKOFF_BASE * (2 ** attempts_before), config.BACKOFF_MAX)
+
+
 def stats():
-    """Snapshot of queue counters for the /stats endpoint."""
+    """Snapshot of queue depth and lifetime counters for /stats and /metrics."""
     r = get_client()
+    now = _now()
     pipe = r.pipeline()
     for p in config.PRIORITIES:
         pipe.zcard(_ready_key(p))
     pipe.zcard(SCHEDULED_KEY)
     pipe.zcard(INFLIGHT_KEY)
     pipe.llen(DEAD_KEY)
+    pipe.zcount(SCHEDULED_KEY, "-inf", now)
     pipe.get(STAT_ENQUEUED)
     pipe.get(STAT_COMPLETED)
     pipe.get(STAT_FAILED)
+    pipe.get(STAT_RETRIED)
+    pipe.get(STAT_DEAD_LETTERS)
+    pipe.get(STAT_PROMOTED)
+    pipe.get(STAT_DEDUPLICATED)
     results = pipe.execute()
 
     n = len(config.PRIORITIES)
     ready_by_priority = {p: results[i] for i, p in enumerate(config.PRIORITIES)}
-    scheduled, inflight, dead, enqueued, completed, failed = results[n:]
+    (
+        scheduled,
+        inflight,
+        dead,
+        scheduled_due,
+        enqueued,
+        completed,
+        failed,
+        retried,
+        dead_letters,
+        promoted,
+        deduplicated,
+    ) = results[n:]
     return {
         "ready": ready_by_priority,
         "ready_total": sum(ready_by_priority.values()),
         "scheduled": scheduled,
+        "scheduled_due": int(scheduled_due or 0),
         "inflight": inflight,
         "dead": dead,
         "enqueued": int(enqueued or 0),
         "completed": int(completed or 0),
         "failed": int(failed or 0),
+        "retried": int(retried or 0),
+        "dead_letters": int(dead_letters or 0),
+        "promoted": int(promoted or 0),
+        "deduplicated": int(deduplicated or 0),
     }

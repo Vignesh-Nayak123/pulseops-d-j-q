@@ -12,6 +12,7 @@
 -- ARGV[1]: now (unix epoch seconds).
 -- ARGV[2]: result ttl in seconds.
 -- ARGV[3]: job id (the member to remove from inflight).
+-- ARGV[4]: JSON-encoded handler result, or an empty string for no result.
 --
 -- Returns 1 if the job was still inflight and got acked, 0 if it was not
 -- inflight anymore (for example the reaper already requeued it, in which case
@@ -32,6 +33,11 @@ if removed == 0 then
 end
 
 redis.call("HSET", job_key, "status", "completed", "completed_at", now)
+-- Store the handler result on the job hash when there is one. An empty string
+-- means the handler returned nothing, so the record keeps its existing shape.
+if ARGV[4] ~= "" then
+  redis.call("HSET", job_key, "result", ARGV[4])
+end
 redis.call("INCR", completed_key)
 -- Let the finished record expire so Redis does not grow without bound, while
 -- still leaving the status queryable for a while after completion.
